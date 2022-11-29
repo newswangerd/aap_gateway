@@ -1,0 +1,20 @@
+<html>
+    <head>
+        <title>AAP Gateway</title>
+    </head>
+    <body>
+        {{if .Username}}
+            Welcome {{.Username}} (<a href="/awx/#/logout">logout</a>)
+        {{else}}
+            <a href="/awx/#/login">Login</a>
+        {{end}}
+
+        <p>
+        Apps:
+        <ul>
+            <li><a href="/galaxy/">Galaxy</a></li>
+            <li><a href="/awx/">AWX</a></li>
+        </ul>
+        </p>
+    </body>
+</html>

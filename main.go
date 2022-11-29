@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
 	"io/ioutil"
 	"log"
@@ -64,13 +65,13 @@ func userToIdentityHeader(user User) string {
 	return base64.StdEncoding.EncodeToString([]byte(data))
 }
 
-func authenticateRequest(req *http.Request, client *http.Client, cfg Config) {
+func authenticateRequest(req *http.Request, client *http.Client, cfg Config) User {
 	// c, err := req.Cookie(GATEWAY_COOKIE)
 	// c.Name = "awx_sessionid"
 	c, err := req.Cookie("awx_sessionid")
 
 	if err != nil {
-		return
+		return User{}
 	}
 	auth_url, _ := url.Parse(cfg.AwxURL)
 	auth_url.Path = "/api/v2/me/"
@@ -82,21 +83,22 @@ func authenticateRequest(req *http.Request, client *http.Client, cfg Config) {
 	resp, err := client.Do(auth_request)
 
 	if err != nil {
-		return
+		return User{}
 	}
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		fmt.Println("oopsie daisy")
-		return
+		return User{}
 	}
 
 	var result MeResponse
 	if err := json.Unmarshal(body, &result); err != nil {
-		return
+		return User{}
 	}
 
 	req.Header.Set(GATEWAY_HEADER, userToIdentityHeader(result.Results[0]))
+
+	return result.Results[0]
 }
 
 func PrettyPrint(i interface{}) string {
@@ -250,6 +252,16 @@ func galaxyHandler(cfg Config, client *http.Client) http.HandlerFunc {
 	})
 }
 
+func gatewayHandler(cfg Config, client *http.Client) http.HandlerFunc {
+	tmpl := template.Must(template.ParseFiles("./static/gateway/index.html"))
+
+	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		user := authenticateRequest(req, client, cfg)
+		tmpl.Execute(rw, user)
+
+	})
+}
+
 type Config struct {
 	GalaxyAPI string
 	GalaxyUI  string
@@ -296,6 +308,7 @@ func main() {
 
 	http.Handle(cfg.GalaxyUI, http.StripPrefix(cfg.GalaxyUI, http.FileServer(http.Dir("./static/galaxy/"))))
 	http.Handle(cfg.AwxUI, http.StripPrefix(cfg.AwxUI, http.FileServer(http.Dir("./static/awx/"))))
+	http.Handle("/", gatewayHandler(cfg, client))
 
-	log.Fatal(http.ListenAndServeTLS(fmt.Sprintf("localhost:%s", cfg.Port), "localhost.crt", "localhost.key", nil))
+	log.Fatal(http.ListenAndServeTLS(fmt.Sprintf("aap.gateway.local:%s", cfg.Port), "localhost.crt", "localhost.key", nil))
 }
