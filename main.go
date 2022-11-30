@@ -11,16 +11,13 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
-	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
 	"regexp"
 	"strings"
-	"time"
 )
 
-const GATEWAY_COOKIE = "aap-gateway-session"
 const GATEWAY_HEADER = "X-AAP-IDENTITY"
 
 const NAV_INSERT = `
@@ -38,31 +35,29 @@ type User struct {
 	IsSuperuser bool   `json:"is_superuser"`
 }
 
+// response from awx me api
 type MeResponse struct {
 	Count   int    `json:"count"`
 	Results []User `json:"results"`
 }
 
-type XAapIdentity struct {
+// This isn't an actual JWT token. It simulates the data that we would store in one if
+// I took the time to do a real JWT implementation.
+type AapJwtToken struct {
 	Identity User `json:"identity"`
 }
 
-func randomString(length int) string {
-	rand.Seed(time.Now().UnixNano())
-	b := make([]byte, length)
-	rand.Read(b)
-	return fmt.Sprintf("%x", b)[:length]
-}
-
+// Converts the user response from awx into our faux JWT token.
 func userToIdentityHeader(user User) string {
-
-	data, _ := json.Marshal(XAapIdentity{
+	data, _ := json.Marshal(AapJwtToken{
 		Identity: user,
 	})
 
 	return base64.StdEncoding.EncodeToString([]byte(data))
 }
 
+// Use the awx session cookie to query the awx me api to get verify if the user is
+// actually logged in.
 func authenticateRequest(req *http.Request, client *http.Client, cfg Config) User {
 	c, err := req.Cookie("awx_sessionid")
 
@@ -97,11 +92,6 @@ func authenticateRequest(req *http.Request, client *http.Client, cfg Config) Use
 	return result.Results[0]
 }
 
-func PrettyPrint(i interface{}) string {
-	s, _ := json.MarshalIndent(i, "", "\t")
-	return string(s)
-}
-
 func getEnv(key string, fallback string) string {
 	if key, ok := os.LookupEnv(key); ok {
 		return key
@@ -109,39 +99,7 @@ func getEnv(key string, fallback string) string {
 	return fallback
 }
 
-func formatRequest(r *http.Request) string {
-	// Create return string
-	var request []string // Add the request string
-	url := fmt.Sprintf("%v %v %v", r.Method, r.URL, r.Proto)
-	request = append(request, url)                             // Add the host
-	request = append(request, fmt.Sprintf("Host: %v", r.Host)) // Loop through headers
-	for name, headers := range r.Header {
-		for _, h := range headers {
-			request = append(request, fmt.Sprintf("%v: %v", name, h))
-		}
-	}
-
-	// If this is a POST, add post data
-	if r.Method == "POST" {
-		r.ParseForm()
-		request = append(request, "\n")
-		request = append(request, r.Form.Encode())
-	} // Return the request as a string
-	return strings.Join(request, "\n")
-}
-
-func formatResponse(r *http.Response) string {
-	// Create return string
-	var request []string // Add the request string
-	for name, headers := range r.Header {
-		for _, h := range headers {
-			request = append(request, fmt.Sprintf("%v: %v", name, h))
-		}
-	}
-	request = append(request, fmt.Sprintf("Code: %v, %v", r.Status, r.StatusCode))
-	return strings.Join(request, "\n")
-}
-
+// Get a request from the upstream server to send back as the proxied response.
 func requestUpstream(client *http.Client, urlToProxyTo url.URL, rw http.ResponseWriter, req *http.Request) (http.Response, error) {
 	req.Host = urlToProxyTo.Host
 	req.URL.Host = urlToProxyTo.Host
@@ -166,14 +124,13 @@ func requestUpstream(client *http.Client, urlToProxyTo url.URL, rw http.Response
 	return *upstreamServerResponse, nil
 }
 
+// Handles the proxy for the AWX API
 func axwHandler(cfg Config, client *http.Client) http.HandlerFunc {
 	urlToProxyTo, err := url.Parse(cfg.AwxURL)
 
 	if err != nil {
 		log.Fatal("invalid origin server URL")
 	}
-
-	fmt.Println("")
 
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 
@@ -194,14 +151,11 @@ func axwHandler(cfg Config, client *http.Client) http.HandlerFunc {
 		}
 		rw.WriteHeader(upstreamServerResponse.StatusCode)
 		io.Copy(rw, upstreamServerResponse.Body)
-
-		fmt.Println()
 	})
 }
 
+// Handles the proxy for the Galaxy API
 func galaxyHandler(cfg Config, client *http.Client) http.HandlerFunc {
-
-	// define origin server URL
 	proxyPort := cfg.Port
 	urlToProxyTo, err := url.Parse(cfg.GalaxyURL)
 
@@ -211,8 +165,6 @@ func galaxyHandler(cfg Config, client *http.Client) http.HandlerFunc {
 	if err != nil {
 		log.Fatal("invalid origin server URL")
 	}
-
-	fmt.Println("")
 
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		authenticateRequest(req, client, cfg)
@@ -237,11 +189,10 @@ func galaxyHandler(cfg Config, client *http.Client) http.HandlerFunc {
 		}
 		rw.WriteHeader(upstreamServerResponse.StatusCode)
 		rw.Write(modified)
-
-		fmt.Println()
 	})
 }
 
+// Handles the proxy for static content
 func staticProxy(targetUrl string, client *http.Client) http.HandlerFunc {
 	urlToProxyTo, err := url.Parse(targetUrl)
 	if err != nil {
@@ -250,7 +201,6 @@ func staticProxy(targetUrl string, client *http.Client) http.HandlerFunc {
 
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		// save the response from the origin server
-		fmt.Println(urlToProxyTo)
 		upstreamServerResponse, err := requestUpstream(client, *urlToProxyTo, rw, req)
 		if err != nil {
 			return
@@ -263,6 +213,8 @@ func staticProxy(targetUrl string, client *http.Client) http.HandlerFunc {
 	})
 }
 
+// Handles requesting the index.html file for the UI and transforming it with
+// custom navigation.
 func uiHandler(targetUrl string, client *http.Client) http.HandlerFunc {
 	urlToProxyTo, err := url.Parse(targetUrl)
 	if err != nil {
@@ -292,6 +244,7 @@ func uiHandler(targetUrl string, client *http.Client) http.HandlerFunc {
 	})
 }
 
+// Handles the homepage for the gateway.
 func gatewayHandler(cfg Config, client *http.Client) http.HandlerFunc {
 	tmpl := template.Must(template.ParseFiles("./static/gateway/index.html"))
 
@@ -311,9 +264,7 @@ type Config struct {
 }
 
 func main() {
-
 	var cfg = Config{
-
 		GalaxyPath: "/galaxy/",
 		AwxPath:    "/awx/",
 
@@ -322,6 +273,7 @@ func main() {
 		GalaxyURL: "http://localhost:8002",
 	}
 
+	// AWX dev environment uses self signed cert, so disable tls checking.
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
@@ -350,5 +302,6 @@ func main() {
 	// gateway
 	http.Handle("/", gatewayHandler(cfg, client))
 
-	log.Fatal(http.ListenAndServeTLS(fmt.Sprintf("aap.gateway.local:%s", cfg.Port), "localhost.crt", "localhost.key", nil))
+	// HTTPS is required to proxy to the awx dev environment, which uses HTTPS
+	log.Fatal(http.ListenAndServeTLS(fmt.Sprintf("localhost:%s", cfg.Port), "localhost.crt", "localhost.key", nil))
 }
