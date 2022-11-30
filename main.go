@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
@@ -22,15 +23,12 @@ import (
 const GATEWAY_COOKIE = "aap-gateway-session"
 const GATEWAY_HEADER = "X-AAP-IDENTITY"
 
-// "username": "admin",
-// "first_name": "",
-// "last_name": "",
-// "email": "admin@localhost",
-// "is_superuser": true,
-// "is_system_auditor": false,
-// "ldap_dn": "",
-// "last_login": "2022-11-23T16:07:07.958083Z",
-// "external_account": null,
+const NAV_INSERT = `
+<div style="position: fixed; z-index: 100000000; left: 300px; top: 25px; color: white;">
+<a style="color: white;" href="/galaxy/">Go to Galaxy</a>,
+<a style="color: white;" href="/awx/">Go to AWX</a>, 
+<a style="color: white;" href="/">Go to home page</a>, 
+</div>`
 
 type User struct {
 	Username    string `json:"username"`
@@ -66,8 +64,6 @@ func userToIdentityHeader(user User) string {
 }
 
 func authenticateRequest(req *http.Request, client *http.Client, cfg Config) User {
-	// c, err := req.Cookie(GATEWAY_COOKIE)
-	// c.Name = "awx_sessionid"
 	c, err := req.Cookie("awx_sessionid")
 
 	if err != nil {
@@ -153,7 +149,7 @@ func requestUpstream(client *http.Client, urlToProxyTo url.URL, rw http.Response
 	req.RequestURI = ""
 	req.URL.Path = "/" + strings.ReplaceAll(req.URL.Path, "//", "/")
 
-	fmt.Printf("Proxying request to: %s\n", req.URL.RequestURI())
+	fmt.Printf("Proxying request to: %s\n", req.URL.String())
 
 	// save the response from the origin server
 	upstreamServerResponse, err := client.Do(req)
@@ -166,12 +162,6 @@ func requestUpstream(client *http.Client, urlToProxyTo url.URL, rw http.Response
 
 		return http.Response{}, errors.New("Server error")
 	}
-
-	// fmt.Println("REQUEST")
-	// fmt.Println(formatRequest(req))
-
-	// fmt.Println("RESPONSE")
-	// fmt.Println(formatResponse(upstreamServerResponse))
 
 	return *upstreamServerResponse, nil
 }
@@ -252,6 +242,56 @@ func galaxyHandler(cfg Config, client *http.Client) http.HandlerFunc {
 	})
 }
 
+func staticProxy(targetUrl string, client *http.Client) http.HandlerFunc {
+	urlToProxyTo, err := url.Parse(targetUrl)
+	if err != nil {
+		log.Fatal("invalid origin server URL")
+	}
+
+	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		// save the response from the origin server
+		fmt.Println(urlToProxyTo)
+		upstreamServerResponse, err := requestUpstream(client, *urlToProxyTo, rw, req)
+		if err != nil {
+			return
+		}
+		for name, values := range upstreamServerResponse.Header {
+			rw.Header()[name] = values
+		}
+		rw.WriteHeader(upstreamServerResponse.StatusCode)
+		io.Copy(rw, upstreamServerResponse.Body)
+	})
+}
+
+func uiHandler(targetUrl string, client *http.Client) http.HandlerFunc {
+	urlToProxyTo, err := url.Parse(targetUrl)
+	if err != nil {
+		log.Fatal("invalid origin server URL")
+	}
+
+	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		// save the response from the origin server
+		upstreamServerResponse, err := requestUpstream(client, *urlToProxyTo, rw, req)
+		if err != nil {
+			return
+		}
+
+		auth_request, _ := http.NewRequest(http.MethodGet, targetUrl, nil)
+
+		resp, _ := client.Do(auth_request)
+		data, _ := ioutil.ReadAll(resp.Body)
+
+		modified := bytes.Replace(data, []byte("{API_PATH}"), []byte("/galaxy/api/galaxy/"), -1)
+		modified = bytes.Replace(modified, []byte("{BASE_PATH}"), []byte("/galaxy/"), -1)
+		modified = bytes.Replace(modified, []byte("<!-- {NAV} -->"), []byte(NAV_INSERT), -1)
+
+		// Write the response
+		rw.WriteHeader(upstreamServerResponse.StatusCode)
+		rw.Write(modified)
+
+	})
+}
+
 func gatewayHandler(cfg Config, client *http.Client) http.HandlerFunc {
 	tmpl := template.Must(template.ParseFiles("./static/gateway/index.html"))
 
@@ -263,28 +303,23 @@ func gatewayHandler(cfg Config, client *http.Client) http.HandlerFunc {
 }
 
 type Config struct {
-	GalaxyAPI string
-	GalaxyUI  string
-	AwxUI     string
-	AwxAPI    string
-	Port      string
-	AwxURL    string
-	GalaxyURL string
+	GalaxyPath string
+	AwxPath    string
+	Port       string
+	AwxURL     string
+	GalaxyURL  string
 }
 
 func main() {
 
 	var cfg = Config{
 
-		GalaxyAPI: "/galaxy/api/",
-		GalaxyUI:  "/galaxy/",
-
-		AwxAPI: "/awx/api/",
-		AwxUI:  "/awx/",
+		GalaxyPath: "/galaxy/",
+		AwxPath:    "/awx/",
 
 		Port:      getEnv("PROXY_PORT", "8070"),
 		AwxURL:    "https://localhost:8043",
-		GalaxyURL: "http://localhost:5001",
+		GalaxyURL: "http://localhost:8002",
 	}
 
 	tr := &http.Transport{
@@ -296,18 +331,23 @@ func main() {
 			return http.ErrUseLastResponse
 		},
 	}
+	redirectClient := &http.Client{
+		Transport: tr,
+	}
 
 	fmt.Printf("Listening on: %s\n", cfg.Port)
 
-	// taken from https://dev.to/b0r/implement-reverse-proxy-in-gogolang-2cp4
-	galaxyProxy := galaxyHandler(cfg, client)
-	awxProxy := axwHandler(cfg, client)
+	// galaxy
+	http.Handle(cfg.GalaxyPath+"api/", http.StripPrefix(cfg.GalaxyPath, galaxyHandler(cfg, client)))
+	http.Handle("/static/galaxy_ng/", http.StripPrefix("/", staticProxy(cfg.GalaxyURL, client)))
+	http.Handle(cfg.GalaxyPath, http.StripPrefix(cfg.GalaxyPath, uiHandler(cfg.GalaxyURL, redirectClient)))
 
-	http.Handle(cfg.GalaxyAPI, http.StripPrefix(cfg.GalaxyUI, galaxyProxy))
-	http.Handle(cfg.AwxAPI, http.StripPrefix(cfg.AwxUI, awxProxy))
+	// awx
+	http.Handle(cfg.AwxPath+"api/", http.StripPrefix(cfg.AwxPath, axwHandler(cfg, client)))
+	http.Handle(cfg.AwxPath+"static/", http.StripPrefix(cfg.AwxPath, staticProxy(cfg.AwxURL, client)))
+	http.Handle(cfg.AwxPath, http.StripPrefix(cfg.AwxPath, uiHandler(cfg.AwxURL, redirectClient)))
 
-	http.Handle(cfg.GalaxyUI, http.StripPrefix(cfg.GalaxyUI, http.FileServer(http.Dir("./static/galaxy/"))))
-	http.Handle(cfg.AwxUI, http.StripPrefix(cfg.AwxUI, http.FileServer(http.Dir("./static/awx/"))))
+	// gateway
 	http.Handle("/", gatewayHandler(cfg, client))
 
 	log.Fatal(http.ListenAndServeTLS(fmt.Sprintf("aap.gateway.local:%s", cfg.Port), "localhost.crt", "localhost.key", nil))
