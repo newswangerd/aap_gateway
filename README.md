@@ -17,4 +17,4 @@ AWX and GalaxyNG are required to be running using the following checkouts
 
 ### Demo
 
-![demo](./docs/aap_gateway.mov)
+![aap gateway mov](https://user-images.githubusercontent.com/6063371/204899544-86cc3dea-afdd-4b93-9aab-02f600214359.gif)
