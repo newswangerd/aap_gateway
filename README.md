@@ -13,8 +13,8 @@ AWX and GalaxyNG are required to be running using the following checkouts
 
 ### Architecture
 
-![./docs/diagram.png]
+![architecture diagram](./docs/diagram.png)
 
 ### Demo
 
-![./docs/aap_gateway.mov]
+![demo](./docs/aap_gateway.mov)
